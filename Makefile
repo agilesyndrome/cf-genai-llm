@@ -20,7 +20,7 @@ bump:
 	git add package.json
 	@test ! -e package-lock.json || git add package-lock.json
 	git commit -m "Release $(PACKAGE_NAME) v$$(node -p "require('./package.json').version")"
-	git tag "$$(node -p "v$$(require('./package.json').version)")"
+	git tag "v$$(node -p "require('./package.json').version")"
 
 publish:
 	git push origin main --follow-tags
