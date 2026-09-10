@@ -36,7 +36,21 @@ publish:
 		version="$$(node -p "require('./package.json').version")"; \
 	fi; \
 	echo "Pushing $$package@$$version and tag v$$version to trigger npm publish."; \
-	git push origin main "v$$version"
+	git push origin main "v$$version"; \
+	if command -v gh >/dev/null 2>&1; then \
+		sha="$$(git rev-parse "v$$version^{commit}")"; \
+		run_id=""; \
+		for attempt in 1 2 3 4 5 6; do \
+			run_id="$$(gh run list --workflow publish.yml --commit "$$sha" --limit 1 --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null || true)"; \
+			test -n "$$run_id" && break; \
+			sleep 5; \
+		done; \
+		test -n "$$run_id" || { echo "Publish workflow was not triggered for v$$version." >&2; exit 1; }; \
+		echo "Watching npm publish workflow run #$$run_id..."; \
+		gh run watch "$$run_id" --exit-status; \
+	else \
+		echo "gh is not installed; tag pushed, but publish workflow status was not checked."; \
+	fi
 
 wait:
 	@echo "Waiting for $(PACKAGE_NAME)@$(VERSION) to appear on npm..."

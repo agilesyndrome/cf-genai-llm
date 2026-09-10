@@ -26,5 +26,7 @@ After the bootstrap publish, configure npm Trusted Publishing for this package:
 For later releases, run `make publish`. It checks npmjs and the Git remote for
 the current version/tag; if either already exists, it runs the patch bump,
 commits the updated package metadata, and pushes the new matching `v*` tag.
-The tag-triggered workflow then runs the package checks and publishes using
-GitHub OIDC; no npm token secret is required.
+The tag triggers the `Publish to npmjs` workflow, which runs the checks and
+publishes using GitHub OIDC. The npm Trusted Publisher must be configured for
+organization `agilesyndrome`, repository `cf-genai-llm`, workflow filename
+`publish.yml`, with `npm publish` allowed.
