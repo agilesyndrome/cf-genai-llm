@@ -1,7 +1,15 @@
-# @agilesyndrome/cf-genai-feature
+# @agilesyndrome/cf-genai-llm
 
-Use this repository as the starting point for a composable Cloudflare Worker
-feature such as passport stamps or LLM access.
+Reusable Cloudflare Worker LLM access with typed generation, parallel batches,
+reviews, one-shot schema repair, structured logs, and token accounting.
+
+```js
+import { createLLM } from "@agilesyndrome/cf-genai-llm";
+
+const llm = createLLM({ env, metadata: { app: "cookbook" } });
+const result = await llm.generate("Write a summary", schema, { schemaName: "summary" });
+const reviews = await llm.reviewMulti(result, reviewerPrompts, reviewSchema);
+```
 
 A feature exports an object with middleware(request, env, ctx, next, state).
 Applications layer it into @agilesyndrome/cf-genai-base:
