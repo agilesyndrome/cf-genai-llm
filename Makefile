@@ -38,7 +38,7 @@ wait:
 	@echo "$(PACKAGE_NAME)@$(VERSION) is available on npm."
 
 release: bump
-	$$(MAKE) publish wait
+	$(MAKE) publish wait
 
 status:
 	@set -eu; \
