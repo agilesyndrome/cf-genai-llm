@@ -23,7 +23,7 @@ bump:
 	git tag "v$$(node -p "require('./package.json').version")"
 
 publish:
-	git push origin main --follow-tags
+	git push origin main "v$(VERSION)"
 
 wait:
 	@echo "Waiting for $(PACKAGE_NAME)@$(VERSION) to appear on npm..."
