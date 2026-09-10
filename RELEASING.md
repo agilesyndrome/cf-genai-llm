@@ -23,7 +23,8 @@ After the bootstrap publish, configure npm Trusted Publishing for this package:
 - Environment: blank
 - Allowed action: `npm publish`
 
-For later releases, bump `version` in `package.json`, commit and push it to
-`main`, then create and push a matching `v*` tag. The existing workflow runs
-the package checks and publishes using GitHub OIDC; no npm token secret is
-required.
+For later releases, run `make publish`. It checks npmjs and the Git remote for
+the current version/tag; if either already exists, it runs the patch bump,
+commits the updated package metadata, and pushes the new matching `v*` tag.
+The tag-triggered workflow then runs the package checks and publishes using
+GitHub OIDC; no npm token secret is required.

@@ -23,7 +23,20 @@ bump:
 	git tag "v$$(node -p "require('./package.json').version")"
 
 publish:
-	git push origin main "v$(VERSION)"
+	@set -eu; \
+	package="$(PACKAGE_NAME)"; \
+	version="$$(node -p "require('./package.json').version")"; \
+	npm_version="$$(npm view "$$package@$$version" version 2>/dev/null || true)"; \
+	tag="v$$version"; \
+	local_tag="$$(git tag --list "$$tag")"; \
+	remote_tag="$$(git ls-remote --tags origin "refs/tags/$$tag" 2>/dev/null || true)"; \
+	if test "$$npm_version" = "$$version" || test -n "$$local_tag" || test -n "$$remote_tag"; then \
+		echo "$$package@$$version is already consumed; bumping before publish."; \
+		$(MAKE) bump; \
+		version="$$(node -p "require('./package.json').version")"; \
+	fi; \
+	echo "Pushing $$package@$$version and tag v$$version to trigger npm publish."; \
+	git push origin main "v$$version"
 
 wait:
 	@echo "Waiting for $(PACKAGE_NAME)@$(VERSION) to appear on npm..."
