@@ -1,6 +1,10 @@
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-5.4";
 
+const DEFAULT_MODELS_ENDPOINT = "https://api.openai.com/v1/models";
+export class LLMCircuitBreakerError extends Error { constructor(message = "LLM generation is temporarily unavailable") { super(message); this.name = "LLMCircuitBreakerError"; this.code = "circuit_breaker_open"; this.circuitBreakerOpen = true; } }
+
+import { getCircuitBreaker, registerCircuitBreaker, registerHealthcheck, setCircuitBreaker } from "@agilesyndrome/cf-genai-base";
 export class LLMResponseError extends Error {
   constructor(message, llmResponse, cause) {
     super(message, { cause });
@@ -18,6 +22,9 @@ export function createLLM(options = {}) {
   const model = options.model || ((env) => env?.OPENAI_MODEL || DEFAULT_MODEL);
   const defaults = options.metadata || {};
   const debugLogging = options.debugLogging === true;
+  const featureName = options.feature || options.featureName || "cf-genai-llm";
+  const breakerId = options.breakerId || featureName + ":openai-models";
+  const healthcheckId = options.healthcheckId || featureName + ":openai-models";
   if (typeof fetcher !== "function") throw new TypeError("createLLM requires fetch");
 
   const log = (level, event) => {
@@ -25,7 +32,11 @@ export function createLLM(options = {}) {
     try { (logger[level] || logger.info || (() => {})).call(logger, JSON.stringify({ source: "cf-genai-llm", ...event })); } catch { /* logging cannot break a request */ }
   };
 
-  async function request(prompt, schema, requestOptions = {}) {
+  async function assertAvailable(requestOptions = {}) { const env = requestOptions.env || options.env; if (!env || !env.DB || requestOptions.allowWhenCircuitTripped) return; const breaker = await getCircuitBreaker(env, breakerId, { who: requestOptions.who || "system:read" }).catch(() => null); if (breaker && breaker.state !== "on") throw new LLMCircuitBreakerError(); }
+
+  async function listModels(requestOptions = {}) { const env = requestOptions.env || options.env; const apiKey = requestOptions.apiKey || options.apiKey || (env && env.OPENAI_API_KEY); if (!apiKey) throw new Error("OPENAI_API_KEY is not configured"); const modelsEndpoint = requestOptions.modelsEndpoint || options.modelsEndpoint || (typeof endpoint === "string" && endpoint.endsWith("/responses") ? endpoint.slice(0, -10) + "models" : DEFAULT_MODELS_ENDPOINT); try { const response = await fetcher(typeof modelsEndpoint === "function" ? modelsEndpoint(env) : modelsEndpoint, { method: "GET", headers: { Authorization: "Bearer " + apiKey }, signal: requestOptions.signal }); const payload = await response.json(); if (!response.ok) throw new LLMResponseError("OpenAI model list failed (" + response.status + ")", payload); if (env && env.DB) { await registerHealthcheck(env, { id: healthcheckId, feature: featureName, component: "openai-models", displayName: "OpenAI model availability", state: "green", metadata: { count: Array.isArray(payload.data) ? payload.data.length : 0 } }, { who: requestOptions.who || "system:update" }); await registerCircuitBreaker(env, { id: breakerId, feature: featureName, name: "openai-models", displayName: "OpenAI model access", state: "on", allowSelfHealing: true, healthchecks: [healthcheckId] }, { who: requestOptions.who || "system:update" }); await setCircuitBreaker(env, breakerId, "on", { who: requestOptions.who || "system:update", automated: true }).catch(() => {}); } return payload.data || []; } catch (error) { if (env && env.DB) { await registerHealthcheck(env, { id: healthcheckId, feature: featureName, component: "openai-models", displayName: "OpenAI model availability", state: "red", metadata: { error: error.message } }, { who: requestOptions.who || "system:update" }).catch(() => {}); await registerCircuitBreaker(env, { id: breakerId, feature: featureName, name: "openai-models", displayName: "OpenAI model access", state: "on", allowSelfHealing: true, healthchecks: [healthcheckId] }, { who: requestOptions.who || "system:update" }).then(() => setCircuitBreaker(env, breakerId, "tripped", { who: requestOptions.who || "system:update", automated: true })).catch(() => {}); } throw error; } }
+
+  async function request(prompt, schema, requestOptions = {}) { await assertAvailable(requestOptions);
     const started = Date.now();
     const requestId = requestOptions.requestId || crypto.randomUUID();
     const env = requestOptions.env || options.env;
@@ -93,7 +104,7 @@ export function createLLM(options = {}) {
     }));
   }
 
-  return { generate, generateMulti, generateWithSchema: generate, generateMultiWithSchema: generateMulti, review, reviewMulti, reviewWithSchema: review, reviewMultiWithSchema: reviewMulti };
+  return { listModels, generate, generateMulti, generateWithSchema: generate, generateMultiWithSchema: generateMulti, review, reviewMulti, reviewWithSchema: review, reviewMultiWithSchema: reviewMulti };
 }
 
 function normalizeGenerateArgs(promptOrRequest, schemaOrOptions, maybeOptions) {
@@ -120,4 +131,4 @@ function validate(value, schema, path) {
 }
 function normalizeUsage(usage = {}) { return { inputTokens: usage.input_tokens ?? usage.prompt_tokens ?? 0, outputTokens: usage.output_tokens ?? usage.completion_tokens ?? 0, totalTokens: usage.total_tokens ?? 0 }; }
 
-export function createFeature(options = {}) { const name = options.name || "cf-genai-llm"; return { name, middleware: async (request, env, ctx, next, state) => { if (options.boot) await options.boot(env, { request, ctx, state }); return options.handle ? options.handle(request, env, ctx, next, state) : next(); } }; }
+export function createFeature(options = {}) { const name = options.name || "cf-genai-llm"; const client = createLLM({ ...options, feature: name }); return { name, healthcheck: async (env) => { if (!env || !env.OPENAI_API_KEY) return [{ feature: name, component: "configuration", displayName: "OpenAI configuration", state: "red" }]; try { await client.listModels({ env, who: "system:update" }); return [{ feature: name, component: "configuration", displayName: "OpenAI configuration", state: "green" }]; } catch { return [{ feature: name, component: "configuration", displayName: "OpenAI configuration", state: "yellow" }]; } }, healthchecks: [{ feature: name, component: "openai-models", displayName: "OpenAI model availability", state: "yellow" }], circuitBreakers: [{ id: name + ":openai-models", feature: name, name: "openai-models", displayName: "OpenAI model access", state: "on", allowSelfHealing: true, healthchecks: [name + ":openai-models"] }], middleware: async (request, env, ctx, next, state) => { if (options.boot) await options.boot(env, { request, ctx, state }); return options.handle ? options.handle(request, env, ctx, next, state) : next(); } }; }
