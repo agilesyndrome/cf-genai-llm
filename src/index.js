@@ -3,7 +3,7 @@ const DEFAULT_MODEL = "gpt-5.4";
 
 const DEFAULT_MODELS_ENDPOINT = "https://api.openai.com/v1/models";
 export const PACKAGE_NAME = "@agilesyndrome/cf-genai-llm";
-export const VERSION = "0.1.10";
+export const VERSION = "0.1.11";
 export class LLMCircuitBreakerError extends Error { constructor(message = "LLM generation is temporarily unavailable") { super(message); this.name = "LLMCircuitBreakerError"; this.code = "circuit_breaker_open"; this.circuitBreakerOpen = true; } }
 
 import { getCircuitBreaker, registerCircuitBreaker, registerHealthcheck, setCircuitBreaker } from "@agilesyndrome/cf-genai-base";
