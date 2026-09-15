@@ -4,7 +4,7 @@ import { createFeature, createLLM, LLMResponseError } from "../src/index.js";
 
 test("feature delegates to the next handler", async () => {
   const feature = createFeature({ name: "example" });
-  assert.equal(feature.version, "4.1.0");
+  assert.equal(feature.version, "4.1.1");
   const response = await feature.middleware(new Request("https://example.test/"), {}, {}, () => Response.json({ ok: true }), {});
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
@@ -15,22 +15,21 @@ function response(text, usage = { input_tokens: 3, output_tokens: 2, total_token
 
 test("generate sends metadata, validates typed output, and logs token counts", async () => {
   const calls = []; const logs = [];
-  const llm = createLLM({ apiKey: "test", fetch: async (url, init) => { calls.push({ url, headers: init.headers, body: JSON.parse(init.body) }); return response("{\"answer\":\"ok\"}"); }, logger: { debug: (line) => logs.push(JSON.parse(line)), info: (line) => logs.push(JSON.parse(line)) }, metadata: { app: "test" } });
+  const llm = createLLM({ env: { LLM_API_TOKEN: "test" }, fetch: async (url, init) => { calls.push({ url, headers: init.headers, body: JSON.parse(init.body) }); return response("{\"answer\":\"ok\"}"); }, logger: { debug: (line) => logs.push(JSON.parse(line)), info: (line) => logs.push(JSON.parse(line)) }, metadata: { app: "test" } });
   assert.deepEqual(await llm.generate("hello", schema, { schemaName: "answer", metadata: { type: "unit" } }), { answer: "ok" });
   assert.equal(calls[0].url, "https://api.openai.com/v1/responses");
   assert.equal(calls[0].headers.Authorization, "Bearer test");
   assert.equal(calls[0].body.metadata.type, "unit");
   const responseLog = logs.find((entry) => entry.event === "llm.response");
   assert.equal(responseLog.usage.totalTokens, 5);
-  assert.equal(responseLog.provider, "openai");
+  assert.equal(responseLog.provider, "openai-compatible");
   assert.equal(responseLog.gateway, false);
 });
 
 test("Cloudflare AI Gateway routes Responses and model health through the gateway", async () => {
   const calls = [];
   const llm = createLLM({
-    apiKey: "openai-key",
-    gateway: { url: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/", token: "gateway-key" },
+    env: { LLM_API_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/", LLM_API_TOKEN: "gateway-key" },
     fetch: async (url, init) => {
       calls.push({ url, headers: init.headers });
       return init.method === "GET"
@@ -43,21 +42,13 @@ test("Cloudflare AI Gateway routes Responses and model health through the gatewa
   assert.deepEqual(await llm.listModels(), [{ id: "gpt-5.4" }]);
   assert.equal(calls[0].url, "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/responses");
   assert.equal(calls[1].url, "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/models");
-  assert.equal(calls[0].headers.Authorization, "Bearer openai-key");
   assert.equal(calls[0].headers["cf-aig-authorization"], "Bearer gateway-key");
 });
 
 test("environment configuration supports Gateway routing and provider-neutral names", async () => {
   const calls = [];
   const llm = createLLM({
-    env: {
-      LLM_API_KEY: "provider-key",
-      LLM_MODEL: "gpt-5.4-mini",
-      CF_AI_GATEWAY_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/responses",
-      CF_AI_GATEWAY_TOKEN: "gateway-key",
-      // A legacy URL must not bypass an explicitly enabled Gateway.
-      OPENAI_COMPLETIONS_URL: "https://legacy.example/responses",
-    },
+    env: { LLM_API_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai/responses", LLM_API_TOKEN: "gateway-key", LLM_MODEL: "gpt-5.4-mini" },
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return response("ok"); },
   });
 
@@ -66,23 +57,10 @@ test("environment configuration supports Gateway routing and provider-neutral na
   assert.equal(calls[0].body.model, "gpt-5.4-mini");
 });
 
-test("Gateway supports Cloudflare-stored provider keys", async () => {
+test("the universal URL selects direct routing or Cloudflare Gateway routing", async () => {
   const calls = [];
   const llm = createLLM({
-    gateway: { url: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai", token: "gateway-key" },
-    fetch: async (url, init) => { calls.push({ url, headers: init.headers }); return response("ok"); },
-  });
-
-  assert.equal(await llm.generate("hello"), "ok");
-  assert.equal(calls[0].headers.Authorization, undefined);
-  assert.equal(calls[0].headers["cf-aig-authorization"], "Bearer gateway-key");
-});
-
-test("gateway false preserves direct OpenAI routing", async () => {
-  const calls = [];
-  const llm = createLLM({
-    env: { OPENAI_API_KEY: "openai-key", CF_AI_GATEWAY_URL: "https://gateway.example/openai" },
-    gateway: false,
+    env: { LLM_API_URL: "https://api.openai.com/v1/responses", LLM_API_TOKEN: "openai-key" },
     fetch: async (url) => { calls.push(url); return response("ok"); },
   });
 
@@ -90,14 +68,37 @@ test("gateway false preserves direct OpenAI routing", async () => {
   assert.equal(calls[0], "https://api.openai.com/v1/responses");
 });
 
-test("unsupported providers fail at the adapter boundary", async () => {
-  const llm = createLLM({ provider: "workers-ai", apiKey: "test", fetch: async () => response("unused") });
-  await assert.rejects(() => llm.generate("hello"), /Unsupported LLM provider: workers-ai/);
+test("universal URL, token, and model variables support OpenAI-compatible endpoints", async () => {
+  const calls = [];
+  const llm = createLLM({
+    env: { LLM_API_URL: "https://openrelay.example/v1/responses", LLM_API_TOKEN: "relay-key", LLM_MODEL: "relay-model" },
+    fetch: async (url, init) => { calls.push({ url, headers: init.headers, body: JSON.parse(init.body) }); return response("ok"); },
+  });
+
+  assert.equal(await llm.generate("hello"), "ok");
+  assert.equal(calls[0].url, "https://openrelay.example/v1/responses");
+  assert.equal(calls[0].headers.Authorization, "Bearer relay-key");
+  assert.equal(calls[0].body.model, "relay-model");
+});
+
+test("auto model selection uses the compatible endpoint's model list", async () => {
+  const calls = [];
+  const llm = createLLM({
+    env: { LLM_API_URL: "https://openrelay.example/v1/responses", LLM_API_TOKEN: "relay-key", LLM_MODEL: "auto" },
+    fetch: async (url, init) => {
+      calls.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
+      return init.method === "GET" ? new Response(JSON.stringify({ data: [{ id: "auto-model" }] }), { status: 200 }) : response("ok");
+    },
+  });
+
+  assert.equal(await llm.generate("hello"), "ok");
+  assert.equal(calls[0].url, "https://openrelay.example/v1/models");
+  assert.equal(calls[1].body.model, "auto-model");
 });
 
 test("generateMulti starts parallel typed requests and reviewMulti preserves order", async () => {
   let active = 0; let peak = 0;
-  const llm = createLLM({ apiKey: "test", fetch: async (_url, init) => { active++; peak = Math.max(peak, active); const body = JSON.parse(init.body); await new Promise((resolve) => setTimeout(resolve, 5)); active--; return response(JSON.stringify({ answer: body.input.includes("two") ? "two" : "one" })); } });
+  const llm = createLLM({ env: { LLM_API_TOKEN: "test" }, fetch: async (_url, init) => { active++; peak = Math.max(peak, active); const body = JSON.parse(init.body); await new Promise((resolve) => setTimeout(resolve, 5)); active--; return response(JSON.stringify({ answer: body.input.includes("two") ? "two" : "one" })); } });
   const results = await llm.generateMulti(["one", "two"], schema);
   assert.deepEqual(results, [{ answer: "one" }, { answer: "two" }]); assert.equal(peak, 2);
   assert.deepEqual(await llm.reviewMulti("source", ["first", "second"], schema), [{ answer: "one" }, { answer: "one" }]);
@@ -105,8 +106,8 @@ test("generateMulti starts parallel typed requests and reviewMulti preserves ord
 
 test("invalid typed output gets one repair, then exposes the raw model response", async () => {
   let count = 0;
-  const llm = createLLM({ apiKey: "test", fetch: async () => { count++; return response(count === 1 ? "{\"wrong\":true}" : "{\"answer\":\"fixed\"}"); } });
+  const llm = createLLM({ env: { LLM_API_TOKEN: "test" }, fetch: async () => { count++; return response(count === 1 ? "{\"wrong\":true}" : "{\"answer\":\"fixed\"}"); } });
   assert.deepEqual(await llm.generate("repair me", schema), { answer: "fixed" }); assert.equal(count, 2);
-  const failing = createLLM({ apiKey: "test", fetch: async () => response("{\"wrong\":true}") });
+  const failing = createLLM({ env: { LLM_API_TOKEN: "test" }, fetch: async () => response("{\"wrong\":true}") });
   await assert.rejects(() => failing.generate("fail", schema), (error) => error instanceof LLMResponseError && error.responseFailed && error.llmResponse.output_text === "{\"wrong\":true}");
 });
