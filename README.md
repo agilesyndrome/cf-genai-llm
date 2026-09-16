@@ -11,6 +11,26 @@ const result = await llm.generate("Write a summary", schema, { schemaName: "summ
 const reviews = await llm.reviewMulti(result, reviewerPrompts, reviewSchema);
 ```
 
+Long-running generation is explicit. Dispatch a base job to an application-owned
+Cloudflare Workflow, then execute the generation from that Workflow with the
+same job ID:
+
+```js
+const execution = await llm.generateJob(event.payload.jobId, prompt, schema, {
+  env: this.env,
+  job: {
+    toJobResult: async (recipe) => {
+      await recipes.save(recipe);
+      return { resourceType: "recipe", resourceId: recipe.id };
+    },
+  },
+});
+```
+
+`generateJob` reports phases through base's durable job events. It deliberately
+stores no generated content by default; `job.toJobResult` should persist the
+domain value and return only the small result descriptor needed by the UI.
+
 ## Providers and AI Gateway
 
 The client speaks the OpenAI Responses-compatible API. OpenAI is the default

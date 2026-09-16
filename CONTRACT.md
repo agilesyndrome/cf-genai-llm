@@ -1,7 +1,8 @@
 # LLM feature contract
 
 - createFeature(options) returns name and middleware.
-- createLLM(options) returns `generate`, `generateMulti`, `review`, and `reviewMulti`.
+- createLLM(options) returns `generate`, `generateJob`, `generateMulti`, `review`, and `reviewMulti`.
+- `generateJob(jobId, ...)` executes an already-dispatched base job, reports progress without model text, and stores `{}` unless `job.toJobResult` supplies a compact domain result.
 - `generateMulti` and `reviewMulti` start all requests concurrently and preserve input order.
 - The client uses the OpenAI Responses-compatible contract; OpenAI is the default endpoint and arbitrary compatible endpoints are supported.
 - `LLM_API_URL`, `LLM_API_TOKEN`, and `LLM_MODEL` are the universal configuration variables.

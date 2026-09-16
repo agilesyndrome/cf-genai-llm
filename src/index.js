@@ -1,10 +1,10 @@
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-5.4";
 export const PACKAGE_NAME = "@agilesyndrome/cf-genai-llm";
-export const VERSION = "4.1.1";
+export const VERSION = "5.0.0";
 export class LLMCircuitBreakerError extends Error { constructor(message = "LLM generation is temporarily unavailable") { super(message); this.name = "LLMCircuitBreakerError"; this.code = "circuit_breaker_open"; this.circuitBreakerOpen = true; } }
 
-import { getCircuitBreaker, registerCircuitBreaker, registerHealthcheck, setCircuitBreaker } from "@agilesyndrome/cf-genai-base";
+import { executeJob, getCircuitBreaker, registerCircuitBreaker, registerHealthcheck, setCircuitBreaker } from "@agilesyndrome/cf-genai-base";
 export class LLMResponseError extends Error {
   constructor(message, llmResponse, cause) {
     super(message, { cause });
@@ -87,6 +87,36 @@ export function createLLM(options = {}) {
     return Promise.all(items.map((item) => generate(typeof item === "string" ? { prompt: item, schema: shared.schema } : { ...item, schema: item.schema || shared.schema }, { ...shared.options, ...(item.options || {}) })));
   }
 
+  async function generateJob(jobId, promptOrRequest, schemaOrOptions, maybeOptions) {
+    const input = normalizeGenerateArgs(promptOrRequest, schemaOrOptions, maybeOptions);
+    const jobOptions = input.options.job || {};
+    const generationOptions = { ...input.options };
+    delete generationOptions.job;
+    const env = generationOptions.env || options.env;
+    if (!env?.DB) throw new TypeError("generateJob requires an environment with DB");
+    const onText = generationOptions.onText;
+    const onUsage = generationOptions.onUsage;
+    return executeJob(env, jobId, async ({ report }) => {
+      await report({ phase: "generating" });
+      const value = await generate(input.prompt, input.schema, {
+        ...generationOptions,
+        onText: async (text) => {
+          if (onText) await onText(text);
+          await report({ phase: "generated" });
+        },
+        onUsage: async (usage) => {
+          if (onUsage) await onUsage(usage);
+          await report({ phase: "generating", usage });
+        },
+      });
+      return value;
+    }, {
+      who: jobOptions.who || generationOptions.who || "system:update",
+      ctx: jobOptions.ctx || generationOptions.ctx,
+      toJobResult: jobOptions.toJobResult || emptyJobResult,
+    });
+  }
+
   async function review(originalTextOrRequest, reviewPromptOrPrompts, schemaOrOptions, maybeOptions) {
     if (Array.isArray(reviewPromptOrPrompts)) return reviewMulti(originalTextOrRequest, reviewPromptOrPrompts, schemaOrOptions, maybeOptions);
     const args = normalizeReviewArgs(originalTextOrRequest, reviewPromptOrPrompts, schemaOrOptions, maybeOptions);
@@ -102,7 +132,7 @@ export function createLLM(options = {}) {
     }));
   }
 
-  return { listModels, generate, generateMulti, generateWithSchema: generate, generateMultiWithSchema: generateMulti, review, reviewMulti, reviewWithSchema: review, reviewMultiWithSchema: reviewMulti };
+  return { listModels, generate, generateJob, generateMulti, generateWithSchema: generate, generateMultiWithSchema: generateMulti, review, reviewMulti, reviewWithSchema: review, reviewMultiWithSchema: reviewMulti };
 }
 
 function normalizeGenerateArgs(promptOrRequest, schemaOrOptions, maybeOptions) {
@@ -155,5 +185,6 @@ function validate(value, schema, path) {
   if (schema.maximum !== undefined && value > schema.maximum) throw new Error(`${path} is above maximum`);
 }
 function normalizeUsage(usage = {}) { return { inputTokens: usage.input_tokens ?? usage.prompt_tokens ?? 0, outputTokens: usage.output_tokens ?? usage.completion_tokens ?? 0, totalTokens: usage.total_tokens ?? 0 }; }
+function emptyJobResult() { return {}; }
 
 export function createFeature(options = {}) { const name = options.name || "cf-genai-llm"; const client = createLLM({ ...options, feature: name }); return { name, displayName: options.displayName || name, packageName: PACKAGE_NAME, version: VERSION, dataResources: options.dataResources || [], routes: options.routes || [], healthcheck: async (env) => { try { resolveConfig(options, {}, env); } catch { return [{ feature: name, component: "configuration", displayName: "LLM configuration", state: "red" }]; } try { await client.listModels({ env, who: "system:update" }); return [{ feature: name, component: "configuration", displayName: "LLM configuration", state: "green" }]; } catch { return [{ feature: name, component: "configuration", displayName: "LLM configuration", state: "yellow" }]; } }, healthchecks: options.healthchecks || [{ feature: name, component: "llm-models", displayName: "LLM model availability", state: "yellow" }], circuitBreakers: options.circuitBreakers || [{ id: name + ":llm-models", feature: name, name: "llm-models", displayName: "LLM model access", state: "on", allowSelfHealing: true, healthchecks: [name + ":llm-models"] }], middleware: async (request, env, ctx, next, state) => { if (options.boot) await options.boot(env, { request, ctx, state }); return options.handle ? options.handle(request, env, ctx, next, state) : next(); } }; }
