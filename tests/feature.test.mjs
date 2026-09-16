@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createJob, getJob } from "@agilesyndrome/cf-genai-base";
 import { createFeature, createLLM, LLMResponseError } from "../src/index.js";
 
 test("feature delegates to the next handler", async () => {
   const feature = createFeature({ name: "example" });
-  assert.equal(feature.version, "4.1.1");
+  assert.equal(feature.version, "5.0.0");
   const response = await feature.middleware(new Request("https://example.test/"), {}, {}, () => Response.json({ ok: true }), {});
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
@@ -12,6 +13,34 @@ test("feature delegates to the next handler", async () => {
 
 const schema = { type: "object", additionalProperties: false, properties: { answer: { type: "string" } }, required: ["answer"] };
 function response(text, usage = { input_tokens: 3, output_tokens: 2, total_tokens: 5 }) { return new Response(JSON.stringify({ output_text: text, usage }), { status: 200, headers: { "content-type": "application/json" } }); }
+
+function jobDatabase() {
+  const jobs = new Map();
+  const events = [];
+  return {
+    jobs,
+    events,
+    prepare(sql) {
+      const statement = { args: [], bind(...args) { this.args = args; return this; } };
+      statement.run = async () => {
+        if (sql.includes("INSERT INTO core_jobs")) {
+          const [id, type, status, ownerId, tenantId, resourceType, resourceId, input, progress, createdAt, updatedAt, expiresAt] = statement.args;
+          jobs.set(id, { id, type, status, owner_id: ownerId, tenant_id: tenantId, resource_type: resourceType, resource_id: resourceId, input_json: input, result_json: "{}", error_json: null, progress_json: progress, created_at: createdAt, started_at: null, finished_at: null, updated_at: updatedAt, expires_at: expiresAt });
+        } else if (sql.includes("INSERT INTO core_job_events")) {
+          const [id, jobId, type, payload] = statement.args;
+          events.push({ id, job_id: jobId, type, payload_json: payload, created_at: new Date().toISOString() });
+        } else if (sql.startsWith("UPDATE core_jobs SET")) {
+          const row = jobs.get(statement.args.at(-1));
+          for (const [index, assignment] of [...sql.matchAll(/([a-z_]+) = \?/g)].entries()) row[assignment[1]] = statement.args[index];
+        }
+        return {};
+      };
+      statement.first = async () => sql.includes("SELECT * FROM core_jobs WHERE id") ? jobs.get(statement.args[0]) || null : null;
+      statement.all = async () => ({ results: [] });
+      return statement;
+    },
+  };
+}
 
 test("generate sends metadata, validates typed output, and logs token counts", async () => {
   const calls = []; const logs = [];
@@ -24,6 +53,20 @@ test("generate sends metadata, validates typed output, and logs token counts", a
   assert.equal(responseLog.usage.totalTokens, 5);
   assert.equal(responseLog.provider, "openai-compatible");
   assert.equal(responseLog.gateway, false);
+});
+
+test("generateJob updates a dispatched base job without persisting generated content", async () => {
+  const DB = jobDatabase();
+  const env = { DB, LLM_API_TOKEN: "test", eventHandler: async () => {} };
+  const job = await createJob(env, { type: "llm.recipe", ownerId: "user-1" });
+  const llm = createLLM({ env, fetch: async () => response("{\"answer\":\"secret output\"}") });
+  const execution = await llm.generateJob(job.id, "hello", schema, {
+    job: { toJobResult: (value) => ({ answerLength: value.answer.length }) },
+  });
+  assert.deepEqual(execution.value, { answer: "secret output" });
+  assert.deepEqual(execution.job.result, { answerLength: 13 });
+  assert.equal((await getJob(env, job.id)).status, "succeeded");
+  assert.deepEqual(DB.events.map((event) => event.type), ["job.created", "job.running", "job.progress", "job.progress", "job.progress", "job.succeeded"]);
 });
 
 test("Cloudflare AI Gateway routes Responses and model health through the gateway", async () => {
